@@ -124,7 +124,10 @@ class Player(pg.sprite.Sprite):
         self.drop_timer = 0
         self.current_platform = None
 
-        self.shoot_cooldown = 0
+        self.shoot_cooldown = 0        
+
+        self.teleportation_timer = 0  # テレポートクールダウン用タイマー
+        self.invincible_timer = 0  # テレポート直後の無敵用のタイマー
 
     def update(self, key_lst, platforms, jump_pressed=False):
         """
@@ -200,6 +203,28 @@ class Player(pg.sprite.Sprite):
 
         if self.shoot_cooldown > 0:
             self.shoot_cooldown -= 1
+
+    def teleportation(self, key_lst):
+            """
+            テレポート機能
+            Cキーと左右どちらかのキーが押されている場合、押されている方向に150ピクセルテレポートする
+            また、テレポート直後は無敵になり触れた敵を倒す
+            引数 key_lst: 押下されているキーのリストを取得
+            """
+    
+            if self.teleportation_timer == 0:
+                if key_lst[pg.K_c] and key_lst[pg.K_LEFT]:  # 左が押されている場合
+                    self.rect.x -= 150
+                    self.rect.left = max(0, self.rect.left)  # 画面外に出ないように上限を0に
+                    self.teleportation_timer = 100  # 連続でテレポートできないようにクールダウンを設ける
+                    self.invincible_timer = 10  # テレポート先で敵や弾と接触してもいいように無敵にする
+                elif key_lst[pg.K_c] and key_lst[pg.K_RIGHT]:  # 右が押されている場合
+                    self.rect.x += 150
+                    self.teleportation_timer = 100
+                    self.invincible_timer = 10
+            else:
+                self.teleportation_timer -=1
+                self.invincible_timer -=1
 
 
 # ============================================================
@@ -459,6 +484,7 @@ def main():
 
     # スプライトグループ：種類ごとに更新・衝突判定を管理する
     player = Player((200, 400))
+    player_collider = pg.sprite.Group(player)  # テレポート直後無敵用のプレイヤーの当たり判定
     platforms = pg.sprite.Group()
     enemies = pg.sprite.Group()
     player_bullets = pg.sprite.Group()
@@ -494,6 +520,7 @@ def main():
         player.update(key_lst, platforms, jump_pressed)
         # 右へ進むと中央付近で追従。左へ戻ると画面左寄りでカメラも戻る。
         # ただし、過去に進んだ最遠地点から400px以上はカメラを戻さない。
+        player.teleportation(key_lst)
         if player.rect.centerx > camera_x + WIDTH // 2:
             camera_x = player.rect.centerx - WIDTH // 2
         elif player.rect.centerx < camera_x + LEFT_CAMERA_MARGIN:
@@ -540,9 +567,13 @@ def main():
         pg.sprite.groupcollide(enemies, player_bullets, True, True)
 
         # (7) プレイヤー被弾：ライフ制なし、1回でゲームオーバー
-        hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
-        hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
-        game_over = hit_by_bullet or hit_by_enemy
+        if player.invincible_timer > 0:  # テレポート直後の無敵時の処理
+            pg.sprite.groupcollide(player_collider, enemy_bullets, False, True)  # 被弾した弾を消す
+            pg.sprite.groupcollide(player_collider, enemies, False, True)  # 接触した敵を消す
+        else:  # 無敵がない場合のゲームオーバー処理
+            hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
+            hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
+            game_over = hit_by_bullet or hit_by_enemy
 
         # (8) 古いオブジェクトの削除と画面描画
         cleanup_world(platforms, enemies, player_bullets, enemy_bullets, camera_x)

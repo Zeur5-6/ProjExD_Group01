@@ -207,15 +207,25 @@ class Player(pg.sprite.Sprite):
 # ============================================================
 class PlayerBullet(pg.sprite.Sprite):
     """
-    プレイヤーの弾
+    プレイヤーの弾（角度指定による斜め発射に対応）
     """
 
-    def __init__(self, player: Player):
+    # --- 追加機能：弾幕（引数に回転角度 angle0 を追加） ---
+    def __init__(self, player: Player, angle0: float = 0) -> None:
+        """
+        弾画像と進行方向の初期化を行う
+        引数1 player: 弾を発射するPlayerインスタンス
+        引数2 angle0: 発射角度（デフォルト0度）
+        """
         super().__init__()
 
-        self.image = pg.transform.scale(
+        img = pg.transform.scale(
             pg.image.load("fig/attack.png").convert_alpha(), PLAYER_BULLET_SIZE
         )
+        # 左向きの場合は弾画像を反転し、発射角度に合わせて回転させる
+        if player.facing == -1:
+            img = pg.transform.flip(img, True, False)
+        self.image = pg.transform.rotozoom(img, -angle0 * player.facing, 1.0)
 
         self.rect = self.image.get_rect()
         self.direction = player.facing
@@ -226,10 +236,78 @@ class PlayerBullet(pg.sprite.Sprite):
 
         self.speed = 15
 
-    def update(self):
-        self.rect.x += self.speed * self.direction
+        # 回転角度からX方向・Y方向の速度を計算し、小数の座標を保持する
+        rad = math.radians(angle0)
+        self.vx = self.speed * math.cos(rad) * self.direction
+        self.vy = self.speed * math.sin(rad)
+        self.x = float(self.rect.x)
+        self.y = float(self.rect.y)
+
+    def update(self) -> None:
+        """
+        速度ベクトルに従って弾の座標を更新する
+        """
+        self.x += self.vx
+        self.y += self.vy
+        self.rect.x = round(self.x)
+        self.rect.y = round(self.y)
 
         # 画面外の弾はmain()でまとめて削除する
+
+
+# --- 追加機能：弾幕（一度に複数方向へビームを発射するクラス） ---
+class NeoBeam:
+    """
+    複数方向へ広がる弾幕（ビーム）を生成するクラス
+    """
+
+    def __init__(self, bird: Player, num: int) -> None:
+        """
+        弾幕の初期設定を行う
+        引数1 bird: 弾を発射するプレイヤーインスタンス
+        引数2 num: 発射するビームの数
+        """
+        self.bird = bird
+        self.num = num
+
+    def gen_beams(self) -> list[PlayerBullet]:
+        """
+        -50°〜+51°の角度範囲で指定ビーム数分のPlayerBulletを生成しリストで返す
+        戻り値: PlayerBulletインスタンスのリスト
+        """
+        beams: list[PlayerBullet] = []
+        step = int(100 / (self.num - 1)) if self.num > 1 else 100
+        for angle in range(-50, +51, step):
+            beams.append(PlayerBullet(self.bird, angle))
+        return beams
+
+
+# --- 追加機能：残機数（ライフを管理・描画するクラス） ---
+class Life:
+    """
+    プレイヤーの残機数（ライフ）を管理し、画面右下にアイコンを描画するクラス
+    """
+
+    def __init__(self, num: int) -> None:
+        """
+        残機数と表示用アイコン（魔法使い画像）を初期化する
+        引数 num: 初期残機数
+        """
+        self.num = num
+        self.image = pg.transform.scale(
+            pg.image.load("fig/wizard.png").convert_alpha(), (35, 45)
+        )
+
+    def update(self, screen: pg.Surface) -> None:
+        """
+        現在の残機数分だけ画面右下（下から50、右から50基準）にアイコンをblitする
+        引数 screen: 描画対象の画面Surface
+        """
+        for i in range(self.num):
+            rect = self.image.get_rect(
+                center=(WIDTH - 50 - i * 40, HEIGHT - 50)
+            )
+            screen.blit(self.image, rect)
 
 
 # ============================================================
@@ -464,6 +542,9 @@ def main():
     player_bullets = pg.sprite.Group()
     enemy_bullets = pg.sprite.Group()
 
+    # --- 追加機能：残機数（初期残機3でLifeインスタンスを生成） ---
+    life = Life(3)
+
     # カメラは右方向に無限追従し、左へは少し戻れる
     camera_x = 0
     furthest_camera_x = 0
@@ -521,7 +602,12 @@ def main():
 
         # (4) 自機の射撃（クールダウン中は発射しない）
         if key_lst[pg.K_SPACE] and player.shoot_cooldown == 0:
-            player_bullets.add(PlayerBullet(player))
+            # --- 追加機能：弾幕（左Shiftキー同時押しで5方向ビームを発射） ---
+            if key_lst[pg.K_LSHIFT]:
+                neobeam = NeoBeam(player, 5)
+                player_bullets.add(neobeam.gen_beams())
+            else:
+                player_bullets.add(PlayerBullet(player))
             player.shoot_cooldown = 10
 
         # (5) 敵の移動と射撃
@@ -539,10 +625,13 @@ def main():
         pg.sprite.groupcollide(player_bullets, enemy_bullets, True, True)
         pg.sprite.groupcollide(enemies, player_bullets, True, True)
 
-        # (7) プレイヤー被弾：ライフ制なし、1回でゲームオーバー
+        # (7) プレイヤー被弾：ライフ制（残機0でゲームオーバー）
         hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
-        hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
-        game_over = hit_by_bullet or hit_by_enemy
+        hit_by_enemy = bool(pg.sprite.spritecollide(player, enemies, True))
+        # --- 追加機能：残機数（被弾・接触時に残機を1減算し、0以下でゲームオーバー） ---
+        if hit_by_bullet or hit_by_enemy:
+            life.num -= 1
+        game_over = life.num <= 0
 
         # (8) 古いオブジェクトの削除と画面描画
         cleanup_world(platforms, enemies, player_bullets, enemy_bullets, camera_x)
@@ -551,6 +640,8 @@ def main():
         draw_sprites(screen, enemies, camera_x)
         draw_sprites(screen, player_bullets, camera_x)
         draw_sprites(screen, enemy_bullets, camera_x)
+        # --- 追加機能：残機数（残機アイコンの描画） ---
+        life.update(screen)
         pg.display.update()
         # (9) 被弾した場合はGAME OVERを表示して終了
         if game_over:

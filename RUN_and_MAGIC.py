@@ -901,7 +901,7 @@ def main() -> int:
         # AOEの残り回数をMPアイコンで表示
         for i in range(AOE_MAX_USES):
             icon = mp_full if i < player.get_aoe_uses() else mp_empty
-            screen.blit(icon, (20 + i * 40, 15))
+            screen.blit(icon, (20 + i * 40, HEIGHT - 50))
 
         
         # --- 追加機能：残機数（残機アイコンの描画） ---

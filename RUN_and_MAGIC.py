@@ -78,6 +78,14 @@ class Platform(pg.sprite.Sprite):
         self.image.fill((130, 90, 55))
         self.rect = self.image.get_rect(topleft=(x, y))
 
+    def get_image(self) -> pg.Surface:
+        """image を取得する。"""
+        return self.image
+
+    def get_rect(self) -> pg.Rect:
+        """rect を取得する。"""
+        return self.rect
+
 
     # 外部のクラス・共通関数から参照する際のgetter
     def get_image(self) -> pg.Surface:
@@ -91,7 +99,6 @@ class Platform(pg.sprite.Sprite):
 
 # ============================================================
 # 4. プレイヤー：左右移動・ジャンプ・落下・足場の着地
-#    ダブルジャンプを追加する場合は主にこのクラスを変更する
 # ============================================================
 class Player(pg.sprite.Sprite):
     """
@@ -133,18 +140,15 @@ class Player(pg.sprite.Sprite):
         self.y = float(self.rect.y)
         self.drop_timer = 0
         self.current_platform: Platform | None = None
+        self.shoot_cooldown: int = 0
 
-        self.shoot_cooldown =  0        
-
-        self.teleportation_timer =  0  # テレポートクールダウン用タイマー
-        self.invincible_timer = 0  # テレポート直後の無敵用のタイマー
-
+        self.teleportation_timer = 0 # テレポートクールダウン用タイマー
+        self.invincible_timer = 0 # テレポート直後の無敵用のタイマー
 
     # 外部のクラス・共通関数から参照する際のgetter
     def get_imgs(self) -> dict[tuple[int, int], pg.Surface]:
         """imgs を取得する。"""
         return self.imgs
-
     def get_dire(self) -> tuple[int, int]:
         """dire を取得する。"""
         return self.dire
@@ -266,12 +270,12 @@ class Player(pg.sprite.Sprite):
         elif self.vy >= 0 and self.drop_timer == 0:
             for platform in platforms:
                 if (
-                    self.rect.right > platform.rect.left
-                    and self.rect.left < platform.rect.right
-                    and old_bottom <= platform.rect.top
-                    and self.rect.bottom >= platform.rect.top
+                    self.rect.right > platform.get_rect().left
+                    and self.rect.left < platform.get_rect().right
+                    and old_bottom <= platform.get_rect().top
+                    and self.rect.bottom >= platform.get_rect().top
                 ):
-                    self.rect.bottom = platform.rect.top
+                    self.rect.bottom = platform.get_rect().top
                     self.y = float(self.rect.y)
                     self.vy = 0
                     self.on_ground = True
@@ -318,15 +322,20 @@ class Player(pg.sprite.Sprite):
 # ============================================================
 class PlayerBullet(pg.sprite.Sprite):
     """
-    プレイヤーの弾
+    プレイヤーの弾（角度指定による斜め発射・弾幕に対応）
     """
 
-    def __init__(self, player: Player) -> None:
+    def __init__(self, player: Player, angle0: float = 0) -> None:
         super().__init__()
 
-        self.image = pg.transform.scale(
+        img = pg.transform.scale(
             pg.image.load("fig/attack.png").convert_alpha(), PLAYER_BULLET_SIZE
         )
+        if player.get_facing() == -1:
+            img = pg.transform.flip(img, True, False)
+        
+        # 弾の画像回転処理
+        self.image = pg.transform.rotozoom(img, -angle0 * player.get_facing(), 1.0)
 
         self.rect = self.image.get_rect()
         self.direction = player.get_facing()
@@ -337,6 +346,12 @@ class PlayerBullet(pg.sprite.Sprite):
 
         self.speed = 15
 
+        # 回転角度に応じた速度ベクトルの計算
+        rad = math.radians(angle0)
+        self.vx = self.speed * math.cos(rad) * self.direction
+        self.vy = self.speed * math.sin(rad)
+        self.x = float(self.rect.x)
+        self.y = float(self.rect.y)
 
     # 外部のクラス・共通関数から参照する際のgetter
     def get_image(self) -> pg.Surface:
@@ -356,9 +371,60 @@ class PlayerBullet(pg.sprite.Sprite):
         return self.speed
 
     def update(self) -> None:
-        self.rect.x += self.speed * self.direction
+        self.x += self.vx
+        self.y += self.vy
+        self.rect.x = round(self.x)
+        self.rect.y = round(self.y)
 
         # 画面外の弾はmain()でまとめて削除する
+
+
+# ============================================================
+# 【追加機能】弾幕（NeoBeamクラス）：複数方向への拡散弾生成
+# ============================================================
+class NeoBeam:
+    """
+    一度に複数方向へ魔法弾を発射するクラス
+    """
+
+    def __init__(self, player: Player, num: int) -> None:
+        self.player = player
+        self.num = num
+
+    def gen_beams(self) -> list[PlayerBullet]:
+        """
+        -50°〜+51°の角度範囲で指定数分のPlayerBulletを生成しリストで返す
+        """
+        beams: list[PlayerBullet] = []
+        step = int(100 / (self.num - 1)) if self.num > 1 else 100
+        for angle in range(-50, +51, step):
+            beams.append(PlayerBullet(self.player, angle))
+        return beams
+
+
+# ============================================================
+# 【追加機能】残機数（Lifeクラス）：プレイヤーのライフ管理・描画
+# ============================================================
+class Life:
+    """
+    プレイヤー（魔法使い）の残機数を管理し、画面右下にアイコンを描画するクラス
+    """
+
+    def __init__(self, num: int) -> None:
+        self.num = num
+        self.image = pg.transform.scale(
+            pg.image.load("fig/wizard.png").convert_alpha(), (35, 45)
+        )
+
+    def update(self, screen: pg.Surface) -> None:
+        """
+        現在の残機数分だけ画面右下（下から50、右から50基準）にアイコンを描画する
+        """
+        for i in range(self.num):
+            rect = self.image.get_rect(
+                center=(WIDTH - 50 - i * 40, HEIGHT - 50)
+            )
+            screen.blit(self.image, rect)
 
 
 # ============================================================
@@ -451,6 +517,9 @@ class Enemy(pg.sprite.Sprite):
         self.move_timer = random.randint(30, 100)
         self.shoot_timer = random.randint(*ENEMY_SHOOT_INTERVAL)
 
+    def get_image(self) -> pg.Surface:
+        """image を取得する。"""
+        return self.image
 
 
     # 外部のクラス・共通関数から参照する際のgetter
@@ -495,8 +564,6 @@ class Enemy(pg.sprite.Sprite):
         if self.rect.left < 0:
             self.rect.left = 0
             self.speed = abs(self.speed) or 2
-
-
 
 
 # ============================================================
@@ -571,7 +638,6 @@ def show_game_over(screen: pg.Surface, clock: pg.time.Clock) -> None:
 
 # ============================================================
 # 10. 無限マップ生成：先の足場を追加し、時々「足場なし」を作る
-#     低い足場は単発ジャンプ、高い足場は低い足場から登る想定
 # ============================================================
 def generate_platforms(
     platforms: pg.sprite.Group, next_x: int, camera_x: int, last_was_low: bool
@@ -606,7 +672,6 @@ def generate_platforms(
 # ============================================================
 # 11. 敵の無限生成：一定期間に1〜3体を時間差で出現させる
 # ============================================================
-
 def spawn_one_enemy(enemies: pg.sprite.Group, camera_x: int) -> bool:
     """右端の少し先に1体だけ出現。近すぎる敵がいれば今回は見送る。"""
     if len(enemies) >= MAX_ENEMIES:
@@ -666,6 +731,9 @@ def main() -> int:
     player_bullets = pg.sprite.Group()
     enemy_bullets = pg.sprite.Group()
 
+    # --- 追加機能：残機数（初期残機3でLifeインスタンスを生成） ---
+    life = Life(3)
+
     # カメラは右方向に無限追従し、左へは少し戻れる
     camera_x = 0
     furthest_camera_x = 0
@@ -724,7 +792,12 @@ def main() -> int:
 
         # (4) 自機の射撃（クールダウン中は発射しない）
         if key_lst[pg.K_SPACE] and player.can_shoot():
-            player_bullets.add(PlayerBullet(player))
+            # --- 追加機能：弾幕（左Shiftキー同時押しで5方向へ魔法弾を発射） ---
+            if key_lst[pg.K_LSHIFT]:
+                neobeam = NeoBeam(player, 5)
+                player_bullets.add(neobeam.gen_beams())
+            else:
+                player_bullets.add(PlayerBullet(player))
             player.start_shoot_cooldown()
 
         # (5) 敵の移動と射撃
@@ -742,14 +815,18 @@ def main() -> int:
         pg.sprite.groupcollide(player_bullets, enemy_bullets, True, True)
         pg.sprite.groupcollide(enemies, player_bullets, True, True)
 
-        # (7) プレイヤー被弾：ライフ制なし、1回でゲームオーバー
+        # (7) プレイヤー被弾：【追加機能】残機数管理と無敵時間の判定
         if player.invincible_timer > 0:  # テレポート直後の無敵時の処理
             pg.sprite.groupcollide(player_collider, enemy_bullets, False, True)  # 被弾した弾を消す
             pg.sprite.groupcollide(player_collider, enemies, False, True)  # 接触した敵を消す
-        else:  # 無敵がない場合のゲームオーバー処理
+        else:  # 無敵がない場合の被弾処理
             hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
             hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
-            game_over = hit_by_bullet or hit_by_enemy
+
+            if hit_by_bullet or hit_by_enemy:
+                life.num -= 1
+        
+        game_over = life.num <= 0
 
         # (8) 古いオブジェクトの削除と画面描画
         cleanup_world(platforms, enemies, player_bullets, enemy_bullets, camera_x)
@@ -758,8 +835,12 @@ def main() -> int:
         draw_sprites(screen, enemies, camera_x)
         draw_sprites(screen, player_bullets, camera_x)
         draw_sprites(screen, enemy_bullets, camera_x)
+        
+        # --- 追加機能：残機数（残機アイコンの描画） ---
+        life.update(screen)
+        
         pg.display.update()
-        # (9) 被弾した場合はGAME OVERを表示して終了
+        # (9) 被弾して残機が尽きた場合はGAME OVERを表示して終了
         if game_over:
             show_game_over(screen, clock)
             running = False

@@ -144,6 +144,7 @@ class Player(pg.sprite.Sprite):
         self.on_ground = False
 
         # Rectは整数座標なので、縦位置は小数でも別に保持する
+        self.x = float(self.rect.y)
         self.y = float(self.rect.y)
         self.drop_timer = 0
         self.current_platform: Platform | None = None
@@ -194,6 +195,10 @@ class Player(pg.sprite.Sprite):
         """on_ground を取得する。"""
         return self.on_ground
 
+    def get_x(self) -> float:
+        """x を取得する。"""
+        return self.x
+    
     def get_y(self) -> float:
         """y を取得する。"""
         return self.y
@@ -233,6 +238,14 @@ class Player(pg.sprite.Sprite):
         """カメラ左端から出ないよう位置を補正する。"""
         if self.rect.left < camera_x:
             self.rect.left = camera_x
+
+    def parry_bounce(self):
+        """
+        パリィ成功時の跳ね返り
+        """
+        self.vy = self.jump_power * 0.6
+        self.on_ground = False
+        self.current_platform = None
 
     def update(
         self,
@@ -343,6 +356,47 @@ class Player(pg.sprite.Sprite):
             else:
                 self.teleportation_timer -=1
                 self.invincible_timer -=1
+
+
+# ============================================================
+# 4.1 パリィ：自機が空中に居る時zキーでパリィする
+# ============================================================
+class Parry(pg.sprite.Sprite):
+    """
+    パリィに関するクラス
+    """
+    def __init__(self, player: Player, life: int):
+        super().__init__()
+
+        self.player = player
+        self.image = pg.transform.scale(pg.image.load("fig/parry.png").convert_alpha(), (90, 90))  # パリィエフェクトの作成
+        self.image.set_alpha(120)  # 透明度の設定
+        self.rect = self.image.get_rect(center=self.player.rect.center)
+        self.image_angle = 0
+        self.life = life
+
+    def rotate_center_image(self):  # 画像の中心で回転させる関数
+        self.image_angle -= 30  # 画像の傾きを設定
+        rot_image = pg.transform.rotate(self.image, self.image_angle)
+        rot_rect = rot_image.get_rect()
+        rot_rect.center = self.player.rect.center  # 中心位置を設定(移動)
+        self.image = rot_image  # 結果を格納
+        self.rect = rot_rect
+
+    def get_image(self):  # 描画のための関数
+        return self.image
+    
+    def get_rect(self):  # 描画のための関数
+        return self.rect
+
+    def update(self):
+        """
+        パリィエフェクトをプレイヤーに重ねて出して回転させる
+        """
+        self.life -= 1
+        self.rotate_center_image()
+        if self.life <= 0:
+            self.kill()
 
 
 # ============================================================
@@ -545,10 +599,11 @@ class Enemy(pg.sprite.Sprite):
         self.move_timer = random.randint(30, 100)
         self.shoot_timer = random.randint(*ENEMY_SHOOT_INTERVAL)
 
-    def get_image(self) -> pg.Surface:
-        """image を取得する。"""
-        return self.image
+    # def get_image(self) -> pg.Surface:
+    #     """image を取得する。"""
+    #     return self.image
 
+        
 
     # 外部のクラス・共通関数から参照する際のgetter
     def get_image(self) -> pg.Surface:
@@ -754,10 +809,13 @@ def main() -> int:
     # スプライトグループ：種類ごとに更新・衝突判定を管理する
     player = Player((200, 400))
     player_collider = pg.sprite.Group(player)  # テレポート直後無敵用のプレイヤーの当たり判定
+    parry_cooldown = 0
+    parry_time = 15  # パリィの効果時間
     platforms = pg.sprite.Group()
     enemies = pg.sprite.Group()
     player_bullets = pg.sprite.Group()
     enemy_bullets = pg.sprite.Group()
+    parrys = pg.sprite.Group()
 
     # --- 追加機能：残機数（初期残機3でLifeインスタンスを生成） ---
     life = Life(3)
@@ -783,6 +841,7 @@ def main() -> int:
         # (1) キー入力と終了操作
         jump_pressed = False
         aoe_pressed = False
+        parry_pressed = False  # パリィキーが入力されたかどうか
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 running = False
@@ -793,12 +852,16 @@ def main() -> int:
                     jump_pressed = True
                 elif event.key == pg.K_x:
                     aoe_pressed = True
+                elif event.key == pg.K_z:
+                    parry_pressed = True
         if not running:
             break
 
         # (2) プレイヤーの移動・ジャンプ・重力
         key_lst = pg.key.get_pressed()
         player.update(key_lst, platforms, jump_pressed)
+        # パリィエフェクト更新
+        parrys.update()
         # 右へ進むと中央付近で追従。左へ戻ると画面左寄りでカメラも戻る。
         # ただし、過去に進んだ最遠地点から400px以上はカメラを戻さない。
         player.teleportation(key_lst)
@@ -837,7 +900,17 @@ def main() -> int:
                 player_bullets.add(PlayerBullet(player))
             player.start_shoot_cooldown()
 
-        # (5) 敵の移動と射撃
+        # (5) 自機のパリィ（ジャンプごとに一回だけ発動できる）
+        if parry_pressed and not player.get_on_ground():
+            if parry_cooldown == 0:
+                parrys.add(Parry(player, parry_time))
+                parry_cooldown = 1
+
+        # 地面に着地したら再使用可能
+        if player.get_on_ground():
+            parry_cooldown = 0
+
+        # (6) 敵の移動と射撃
         enemies.update()
         for enemy in enemies:
             if enemy.can_shoot():
@@ -846,7 +919,7 @@ def main() -> int:
                     enemy_bullets.add(EnemyBullet(enemy, player))
                 enemy.reset_shoot_timer()
 
-        # (6) 弾の移動と当たり判定：弾同士は相殺、敵は一撃で倒す
+        # (7) 弾の移動と当たり判定：弾同士は相殺、敵は一撃で倒す
         player_bullets.update()
         enemy_bullets.update()
         pg.sprite.groupcollide(player_bullets, enemy_bullets, True, True)
@@ -870,20 +943,34 @@ def main() -> int:
                 if math.hypot(bx - cx, by - cy) <= aoe_r:
                     bullet.kill()
 
-        # (7) プレイヤー被弾：【追加機能】残機数管理と無敵時間の判定
-        if player.invincible_timer > 0:  # テレポート直後の無敵時の処理
-            pg.sprite.groupcollide(player_collider, enemy_bullets, False, True)  # 被弾した弾を消す
-            pg.sprite.groupcollide(player_collider, enemies, False, True)  # 接触した敵を消す
-        else:  # 無敵がない場合の被弾処理
-            hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
-            hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
+        
+        game_over = life.num <= 0
+        # (8) プレイヤー被弾・パリィ判定：ライフ制なし、1回でゲームオーバー
+        parrying = len(parrys) > 0
+        if parrying:
+            parry_bullet = pg.sprite.spritecollideany(player, enemy_bullets)  # 敵の弾との接触
+            parry_enemy = pg.sprite.spritecollideany(player, enemies)  # 敵との接触
+            if parry_bullet or parry_enemy:
+                if parry_bullet:
+                    parry_bullet.kill()  # 接触した弾の削除
+                if parry_enemy:
+                    parry_enemy.kill()  # 接触した敵の削除
+                player.parry_bounce()  # 跳ねる
+                parrys.empty()  # パリィエフェクトの終了
+                parry_cooldown = 0  # パリィの再使用可能
+        else:
+            # (8-1) プレイヤー被弾：【追加機能】残機数管理と無敵時間の判定
+            if player.invincible_timer > 0:  # テレポート直後の無敵時の処理
+                pg.sprite.groupcollide(player_collider, enemy_bullets, False, True)  # 被弾した弾を消す
+                pg.sprite.groupcollide(player_collider, enemies, False, True)  # 接触した敵を消す
+            else:  # 無敵がない場合の被弾処理
+                hit_by_bullet = bool(pg.sprite.spritecollide(player, enemy_bullets, True))
+                hit_by_enemy = pg.sprite.spritecollideany(player, enemies) is not None
 
             if hit_by_bullet or hit_by_enemy:
                 life.num -= 1
-        
-        game_over = life.num <= 0
 
-        # (8) 古いオブジェクトの削除と画面描画
+        # (9) 古いオブジェクトの削除と画面描画
         cleanup_world(platforms, enemies, player_bullets, enemy_bullets, camera_x)
         draw_world(screen, camera_x, platforms)
         screen.blit(player.get_image(), player.get_rect().move(-camera_x, 0))
@@ -908,10 +995,15 @@ def main() -> int:
         life.update(screen)
         
         pg.display.update()
-        # (9) 被弾して残機が尽きた場合はGAME OVERを表示して終了
+        # パリィエフェクト
+        draw_sprites(screen, parrys, camera_x)
+
+        pg.display.update()
+        # (10) 被弾して残機が尽きた場合はGAME OVERを表示して終了
         if game_over:
             show_game_over(screen, clock)
             running = False
+
         clock.tick(FPS)
     return 0
 

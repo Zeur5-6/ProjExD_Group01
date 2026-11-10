@@ -252,6 +252,7 @@ class Player(pg.sprite.Sprite):
         key_lst: pg.key.ScancodeWrapper,
         platforms: pg.sprite.Group,
         jump_pressed: bool = False,
+        jump_snd: pg.mixer.Sound | None = None
     ) -> None:
         """
         左右移動、ジャンプ、重力、着地処理
@@ -283,11 +284,17 @@ class Player(pg.sprite.Sprite):
             self.on_ground = False
             self.current_platform = None
             self.can_double_jump = True 
+
+            if jump_snd is not None:
+                jump_snd.play()  # 通常ジャンプ時にジャンプ音を鳴らす
             #地面に着地しているとき、ダブルジャンプが可能になる
         elif jump_pressed and not self.on_ground and self.can_double_jump:
             self.vy = self.jump_power
             self.can_double_jump = False
             # ダブルジャンプを使ったら、もう一度ジャンプできないようにする
+
+            if jump_snd is not None:
+                jump_snd.play()  # ダブルジャンプ成功時にジャンプ音を鳴らす
 
         # 重力
         old_bottom = self.rect.bottom
@@ -335,7 +342,7 @@ class Player(pg.sprite.Sprite):
         if self.shoot_cooldown > 0:
             self.shoot_cooldown -= 1
 
-    def teleportation(self, key_lst):
+    def teleportation(self, key_lst: pg.key.ScancodeWrapper, teleport_snd: pg.mixer.Sound) -> None:
             """
             テレポート機能
             Cキーと左右どちらかのキーが押されている場合、押されている方向に150ピクセルテレポートする
@@ -349,10 +356,13 @@ class Player(pg.sprite.Sprite):
                     self.rect.left = max(0, self.rect.left)  # 画面外に出ないように上限を0に
                     self.teleportation_timer = 100  # 連続でテレポートできないようにクールダウンを設ける
                     self.invincible_timer = 10  # テレポート先で敵や弾と接触してもいいように無敵にする
+                    teleport_snd.play()  # テレポート音を鳴らす
+
                 elif key_lst[pg.K_c] and key_lst[pg.K_RIGHT]:  # 右が押されている場合
                     self.rect.x += 150
                     self.teleportation_timer = 100
                     self.invincible_timer = 10
+                    teleport_snd.play()  # テレポート音を鳴らす
             else:
                 self.teleportation_timer -=1
                 self.invincible_timer -=1
@@ -806,6 +816,15 @@ def main() -> int:
     pg.display.set_caption("RUN & GUN - Endless")
     screen = pg.display.set_mode((WIDTH, HEIGHT))
 
+    #効果音読み込み
+    jump_snd = pg.mixer.Sound("sounds/jump.wav")
+    shoot_snd = pg.mixer.Sound("sounds/shoot.wav")
+    teleport_snd = pg.mixer.Sound("sounds/teleport.wav")
+    parry_snd = pg.mixer.Sound("sounds/parry.wav")
+    game_over_snd = pg.mixer.Sound("sounds/game_over.wav")
+    damage_snd = pg.mixer.Sound("sounds/damage.wav")
+    aoe_snd = pg.mixer.Sound("sounds/AOE.wav")
+
     # スプライトグループ：種類ごとに更新・衝突判定を管理する
     player = Player((200, 400))
     player_collider = pg.sprite.Group(player)  # テレポート直後無敵用のプレイヤーの当たり判定
@@ -859,12 +878,12 @@ def main() -> int:
 
         # (2) プレイヤーの移動・ジャンプ・重力
         key_lst = pg.key.get_pressed()
-        player.update(key_lst, platforms, jump_pressed)
+        player.update(key_lst, platforms, jump_pressed, jump_snd)
         # パリィエフェクト更新
         parrys.update()
         # 右へ進むと中央付近で追従。左へ戻ると画面左寄りでカメラも戻る。
         # ただし、過去に進んだ最遠地点から400px以上はカメラを戻さない。
-        player.teleportation(key_lst)
+        player.teleportation(key_lst, teleport_snd)
 
         if player.get_rect().centerx > camera_x + WIDTH // 2:
             camera_x = player.get_rect().centerx - WIDTH // 2
@@ -896,9 +915,11 @@ def main() -> int:
             if key_lst[pg.K_LSHIFT]:
                 neobeam = NeoBeam(player, 5)
                 player_bullets.add(neobeam.gen_beams())
+
             else:
                 player_bullets.add(PlayerBullet(player))
             player.start_shoot_cooldown()
+            shoot_snd.play()  # 射撃音を鳴らす
 
         # (5) 自機のパリィ（ジャンプごとに一回だけ発動できる）
         if parry_pressed and not player.get_on_ground():
@@ -928,7 +949,8 @@ def main() -> int:
         # (6.5) AOE攻撃：プレイヤー中心の円の中の敵と敵弾を消す
         if aoe_pressed and player.use_aoe():
             aoe_timer = AOE_EFFECT_FRAMES
-            
+            aoe_snd.play()  # 全体攻撃発生時に効果音を鳴らす
+
         if aoe_timer > 0:
             aoe_r = AOE_RADIUS * (AOE_EFFECT_FRAMES - aoe_timer + 1) // AOE_EFFECT_FRAMES
             cx, cy = player.get_rect().center
@@ -953,8 +975,10 @@ def main() -> int:
             if parry_bullet or parry_enemy:
                 if parry_bullet:
                     parry_bullet.kill()  # 接触した弾の削除
+                    parry_snd.play()  # パリィ成功時にパリィ音を鳴らす
                 if parry_enemy:
                     parry_enemy.kill()  # 接触した敵の削除
+                    parry_snd.play()  # パリィ成功時にパリィ音を鳴らす
                 player.parry_bounce()  # 跳ねる
                 parrys.empty()  # パリィエフェクトの終了
                 parry_cooldown = 0  # パリィの再使用可能
@@ -969,6 +993,11 @@ def main() -> int:
 
             if hit_by_bullet or hit_by_enemy:
                 life.num -= 1
+
+                if life.num > 0:
+                    damage_snd.play()
+                else:
+                    game_over_snd.play()
 
         # (9) 古いオブジェクトの削除と画面描画
         cleanup_world(platforms, enemies, player_bullets, enemy_bullets, camera_x)
@@ -1010,6 +1039,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     pg.init()
+    pg.mixer.init()
     main()
     pg.quit()
     sys.exit()

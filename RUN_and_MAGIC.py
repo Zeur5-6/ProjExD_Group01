@@ -31,6 +31,10 @@ LEFT_CAMERA_MARGIN = 250  # 左へ移動した際にカメラが追い始める�
 ENEMY_SPAWN_INTERVAL = 5000  # ミリ秒
 ENEMIES_PER_WAVE = (1, 3)
 MAX_ENEMIES = 9
+AOE_MAX_USES = 3 #使用上限
+AOE_RADIUS = 500 #半径
+AOE_EFFECT_FRAMES = 25  # 重力場の円が広がりきるまでのフレーム数
+MP_ICON_SIZE = (26, 32)  # MPアイコンの表示サイズ（px）
 
 # 画像ファイルの参照先を、このPythonファイルのあるフォルダに固定する
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -113,6 +117,9 @@ class Player(pg.sprite.Sprite):
     def __init__(self, xy: tuple[int, int]) -> None:
         super().__init__()
 
+        self.on_ground = False
+        self.can_double_jump = False
+        
         img0 = pg.transform.scale(
             pg.image.load("fig/wizard.png").convert_alpha(), (60, 80)
         )
@@ -141,6 +148,8 @@ class Player(pg.sprite.Sprite):
         self.drop_timer = 0
         self.current_platform: Platform | None = None
         self.shoot_cooldown: int = 0
+        self.aoe_uses = AOE_MAX_USES  # AOEの使用回数を初期化
+        
 
         self.teleportation_timer = 0 # テレポートクールダウン用タイマー
         self.invincible_timer = 0 # テレポート直後の無敵用のタイマー
@@ -208,6 +217,17 @@ class Player(pg.sprite.Sprite):
     def start_shoot_cooldown(self) -> None:
         """発射後の待機時間を設定する。"""
         self.shoot_cooldown = 10
+    
+    def get_aoe_uses(self) -> int:
+        """AOEの残り使用回数を取得する。"""
+        return self.aoe_uses
+    
+    def use_aoe(self) -> bool:
+        """AOEを使用し、残り使用回数を減らす。使用可能な場合はTrueを返す。"""
+        if self.aoe_uses > 0:
+            self.aoe_uses -= 1
+            return True
+        return False
 
     def clamp_to_camera(self, camera_x: int) -> None:
         """カメラ左端から出ないよう位置を補正する。"""
@@ -249,6 +269,12 @@ class Player(pg.sprite.Sprite):
             self.vy = self.jump_power
             self.on_ground = False
             self.current_platform = None
+            self.can_double_jump = True 
+            #地面に着地しているとき、ダブルジャンプが可能になる
+        elif jump_pressed and not self.on_ground and self.can_double_jump:
+            self.vy = self.jump_power
+            self.can_double_jump = False
+            # ダブルジャンプを使ったら、もう一度ジャンプできないようにする
 
         # 重力
         old_bottom = self.rect.bottom
@@ -265,6 +291,7 @@ class Player(pg.sprite.Sprite):
             self.y = float(self.rect.y)
             self.vy = 0
             self.on_ground = True
+            self.can_double_jump = True
 
         # 足場との当たり判定
         elif self.vy >= 0 and self.drop_timer == 0:
@@ -280,6 +307,7 @@ class Player(pg.sprite.Sprite):
                     self.vy = 0
                     self.on_ground = True
                     self.current_platform = platform
+                    self.can_double_jump = False
                     break
 
         if self.drop_timer > 0:
@@ -744,10 +772,17 @@ def main() -> int:
     enemy_spawn_schedule = schedule_enemy_wave(last_spawn_time)
     clock = pg.time.Clock()
     running = True
+    mp_full = pg.transform.scale(
+        pg.image.load("fig/portion.png").convert_alpha(), MP_ICON_SIZE
+    )  # 残っているMP
+    mp_empty = mp_full.copy()
+    mp_empty.set_alpha(70)  # 使用済みのMPは薄く表示する
+    aoe_timer = 0  # 重力場の円を表示する残りフレーム
 
     while running:
         # (1) キー入力と終了操作
         jump_pressed = False
+        aoe_pressed = False
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 running = False
@@ -756,6 +791,8 @@ def main() -> int:
                     running = False
                 elif event.key == pg.K_UP:
                     jump_pressed = True
+                elif event.key == pg.K_x:
+                    aoe_pressed = True
         if not running:
             break
 
@@ -815,6 +852,24 @@ def main() -> int:
         pg.sprite.groupcollide(player_bullets, enemy_bullets, True, True)
         pg.sprite.groupcollide(enemies, player_bullets, True, True)
 
+        # (6.5) AOE攻撃：プレイヤー中心の円の中の敵と敵弾を消す
+        if aoe_pressed and player.use_aoe():
+            aoe_timer = AOE_EFFECT_FRAMES
+            
+        if aoe_timer > 0:
+            aoe_r = AOE_RADIUS * (AOE_EFFECT_FRAMES - aoe_timer + 1) // AOE_EFFECT_FRAMES
+            cx, cy = player.get_rect().center
+            
+            for enemy in enemies:
+                ex, ey = enemy.get_rect().center
+                if math.hypot(ex - cx, ey - cy) <= aoe_r:
+                    enemy.kill()
+
+            for bullet in enemy_bullets:
+                bx, by = bullet.get_rect().center
+                if math.hypot(bx - cx, by - cy) <= aoe_r:
+                    bullet.kill()
+
         # (7) プレイヤー被弾：【追加機能】残機数管理と無敵時間の判定
         if player.invincible_timer > 0:  # テレポート直後の無敵時の処理
             pg.sprite.groupcollide(player_collider, enemy_bullets, False, True)  # 被弾した弾を消す
@@ -835,6 +890,19 @@ def main() -> int:
         draw_sprites(screen, enemies, camera_x)
         draw_sprites(screen, player_bullets, camera_x)
         draw_sprites(screen, enemy_bullets, camera_x)
+
+        # 重力場の円：キャラクターから広がっていく
+        if aoe_timer > 0:
+            r = AOE_RADIUS * (AOE_EFFECT_FRAMES - aoe_timer + 1) // AOE_EFFECT_FRAMES
+            center = player.get_rect().move(-camera_x, 0).center
+            pg.draw.circle(screen, (150, 90, 255), center, r, 6)
+            aoe_timer -= 1
+
+        # AOEの残り回数をMPアイコンで表示
+        for i in range(AOE_MAX_USES):
+            icon = mp_full if i < player.get_aoe_uses() else mp_empty
+            screen.blit(icon, (20 + i * 40, HEIGHT - 50))
+
         
         # --- 追加機能：残機数（残機アイコンの描画） ---
         life.update(screen)
